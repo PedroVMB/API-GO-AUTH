@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"bytes"
 	"strconv"
 	"time"
 
@@ -13,19 +14,27 @@ import (
 
 const SecretKey = "secret"
 
+func hashPassword(password string) ([]byte, error) {
+	return bcrypt.GenerateFromPassword([]byte(password), 14)
+}
+
 func Register(c *fiber.Ctx) error {
+	// implement rate limiting.
 	var data map[string]string
 
 	if err := c.BodyParser(&data); err != nil {
 		return err
 	}
 
-	password, _ := bcrypt.GenerateFromPassword([]byte(data["password"]), 14)
+	passwordHash, err := hashPassword(data["password"])
+	if err != nil {
+		return err
+	}
 
 	user := models.User{
 		Name:     data["name"],
 		Email:    data["email"],
-		Password: password,
+		Password: passwordHash,
 	}
 
 	database.DB.Create(&user)
@@ -34,33 +43,37 @@ func Register(c *fiber.Ctx) error {
 }
 
 func Login(c *fiber.Ctx) error {
+	// implement exponential backoff and rate limiting.
 	var data map[string]string
-
 	if err := c.BodyParser(&data); err != nil {
 		return err
 	}
 
-	var user models.User
+	passwordHash, err := hashPassword(data["password"])
+	if err != nil {
+		return err
+	}
 
+	var user models.User
 	database.DB.Where("email = ?", data["email"]).First(&user)
 
 	if user.Id == 0 {
 		c.Status(fiber.StatusNotFound)
 		return c.JSON(fiber.Map{
-			"message": "user not found",
+			"message": "User not found or incorrect password",
 		})
 	}
 
-	if err := bcrypt.CompareHashAndPassword(user.Password, []byte(data["password"])); err != nil {
-		c.Status(fiber.StatusBadRequest)
+	if !bytes.Equal(user.Password, passwordHash) {
+		c.Status(fiber.StatusNotFound)
 		return c.JSON(fiber.Map{
-			"message": "incorrect password",
+			"message": "User not found or incorrect password",
 		})
 	}
 
 	claims := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.StandardClaims{
 		Issuer:    strconv.Itoa(int(user.Id)),
-		ExpiresAt: time.Now().Add(time.Hour * 24).Unix(), //1 day
+		ExpiresAt: time.Now().Add(time.Hour * 24).Unix(),
 	})
 
 	token, err := claims.SignedString([]byte(SecretKey))
